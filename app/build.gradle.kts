@@ -36,11 +36,15 @@ android {
 }
 
 dependencies {
+    implementation ("com.squareup.okhttp3:okhttp:4.12.0")
+
     //Camara
-    implementation("androidx.camera:camera-core:1.3.0")
-    implementation("androidx.camera:camera-camera2:1.3.0")
-    implementation("androidx.camera:camera-lifecycle:1.3.0")
-    implementation("androidx.camera:camera-view:1.3.0")
+    val version = "1.4.1"
+    //Camara
+    implementation("androidx.camera:camera-core:${version}")
+    implementation("androidx.camera:camera-camera2:${version}")
+    implementation("androidx.camera:camera-lifecycle:${version}")
+    implementation("androidx.camera:camera-view:${version}")
 
     //ML Kit para lectura de QR
     implementation("com.google.mlkit:barcode-scanning:17.2.0")

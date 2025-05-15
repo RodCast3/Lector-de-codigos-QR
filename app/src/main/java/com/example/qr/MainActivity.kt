@@ -3,39 +3,52 @@ package com.example.qr
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.Handler
+import android.util.Log
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.camera.view.PreviewView
+import androidx.camera.core.ExperimentalGetImage
+import androidx.annotation.OptIn
+
 import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
+
+import okhttp3.*
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONObject
+
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import androidx.camera.view.PreviewView
-import android.widget.TextView
-import androidx.annotation.OptIn
-import androidx.camera.core.ExperimentalGetImage
+import java.io.IOException
 
 
 class MainActivity : AppCompatActivity() {
     private lateinit var cameraExecutor: ExecutorService
     private lateinit var barcodeScanner: BarcodeScanner
     private lateinit var previewView: PreviewView
-    private lateinit var resultTextView: TextView
+    private var escaneoActivo = true
+    private val serverUrl = "http://192.168.100.66:5000/procesar_palabra"
+    private val client = OkHttpClient()
+    private val JSON = "application/json; charset=utf-8".toMediaType()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
         previewView = findViewById(R.id.previewView)
-        resultTextView = findViewById(R.id.tvResult)
 
         // Configurar el escáner de códigos de barras/QR
         val options = BarcodeScannerOptions.Builder()
@@ -46,22 +59,28 @@ class MainActivity : AppCompatActivity() {
         cameraExecutor = Executors.newSingleThreadExecutor()
 
         // Solicitar permisos de cámara
-        if (allPermissionsGranted()) {
-            startCamera()
+        if (verificarPermisos()) {
+            iniciarCamara()
         } else {
-            ActivityCompat.requestPermissions(
-                this, REQUIRED_PERMISSIONS, REQUEST_CODE_PERMISSIONS
-            )
+            solicitudPermisos.launch(arrayOf(Manifest.permission.CAMERA))
         }
     }
 
-    private fun allPermissionsGranted() = REQUIRED_PERMISSIONS.all {
-        ContextCompat.checkSelfPermission(
-            baseContext, it) == PackageManager.PERMISSION_GRANTED
+
+    override fun onDestroy() {
+        super.onDestroy()
+        cameraExecutor.shutdown()
+        barcodeScanner.close()
     }
 
+
+    private fun verificarPermisos() = REQUIRED_PERMISSIONS.all {
+        ContextCompat.checkSelfPermission(baseContext, it) == PackageManager.PERMISSION_GRANTED
+    }
+
+
     @OptIn(ExperimentalGetImage::class)
-    private fun startCamera() {
+    private fun iniciarCamara() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
 
         cameraProviderFuture.addListener({
@@ -86,65 +105,93 @@ class MainActivity : AppCompatActivity() {
                             barcodeScanner.process(image)
                                 .addOnSuccessListener { barcodes ->
                                     for (barcode in barcodes) {
-                                        val value = barcode.rawValue ?: "No se pudo leer"
-                                        runOnUiThread {
-                                            resultTextView.text = value
+                                        if (escaneoActivo) {
+                                            escaneoActivo = false
+                                            val value = barcode.rawValue ?: "No se pudo leer"
+                                            runOnUiThread {
+                                                Toast.makeText(this, "¡QR leído!", Toast.LENGTH_SHORT).show()
+                                                enviarPalabraAlServidor(value)
+                                            }
+
+                                            // Esperar 5 segundos antes de volver a activar el escaneo
+                                            Handler(mainLooper).postDelayed({
+                                                escaneoActivo = true
+                                            }, 5000)
+                                            break // salir después del primer código leído
                                         }
-                                        // Salir después de encontrar el primer código QR
-                                        break
                                     }
                                 }
-                                .addOnFailureListener {
-                                    // Manejar el error
+                                .addOnFailureListener { e ->
+                                    Log.e("MainActivity", "Error en la detección de QR", e)
                                 }
                                 .addOnCompleteListener {
                                     imageProxy.close()
                                 }
-                        } else {
-                            imageProxy.close()
                         }
                     })
                 }
 
-            // Seleccionar la cámara trasera
-            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+            // Seleccionar la cámara frontal
+            val tipoCamara = CameraSelector.DEFAULT_FRONT_CAMERA
 
             try {
-                // Unbind use cases before rebinding
                 cameraProvider.unbindAll()
-
-                // Bind use cases to camera
                 cameraProvider.bindToLifecycle(
-                    this, cameraSelector, preview, imageAnalyzer)
+                    this, tipoCamara, preview, imageAnalyzer)
             } catch(exc: Exception) {
                 Toast.makeText(this, "Error al iniciar cámara: ${exc.message}", Toast.LENGTH_SHORT).show()
             }
-
         }, ContextCompat.getMainExecutor(this))
     }
 
-    override fun onRequestPermissionsResult(
-        requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQUEST_CODE_PERMISSIONS) {
-            if (allPermissionsGranted()) {
-                startCamera()
-            } else {
-                Toast.makeText(this,
-                    "Los permisos no fueron concedidos.", Toast.LENGTH_SHORT).show()
-                finish()
+
+    private fun enviarPalabraAlServidor(palabra: String) {
+        val json = JSONObject().apply {
+            put("palabra", palabra)
+        }
+
+        val body = json.toString().toRequestBody(JSON)
+        val request = Request.Builder()
+            .url(serverUrl)
+            .post(body)
+            .build()
+
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                runOnUiThread {
+                    Toast.makeText(this@MainActivity, "Error al enviar palabra: ${e.message}", Toast.LENGTH_LONG).show()
+                    Log.e("TEXTO", "Error", e)
+                }
             }
+
+            override fun onResponse(call: Call, response: Response) {
+                val respuesta = response.body?.string()
+                runOnUiThread {
+                    if (respuesta != null) {
+                        val jsonRespuesta = JSONObject(respuesta)
+                        val mensaje = """
+                             ${jsonRespuesta.getString("procesada")}
+                        """.trimIndent()
+                        Toast.makeText(this@MainActivity, "Respuesta: $mensaje", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        })
+    }
+    
+    
+    private val solicitudPermisos = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        if (permissions[Manifest.permission.CAMERA] == true) {
+            iniciarCamara()
+        } else {
+            Toast.makeText(this, "Se necesita aceptar los permisos de camara", Toast.LENGTH_LONG).show()
         }
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        cameraExecutor.shutdown()
-        barcodeScanner.close()
-    }
-
+    //Permiso de camara
     companion object {
-        private const val REQUEST_CODE_PERMISSIONS = 10
         private val REQUIRED_PERMISSIONS = arrayOf(Manifest.permission.CAMERA)
     }
 }
